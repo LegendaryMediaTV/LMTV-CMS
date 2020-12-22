@@ -1,0 +1,20 @@
+{
+  "_id": "settings",
+  "site": {
+    "title": "CMS Demo",
+    "titleSeparator": " | ",
+    "subtitleSeparator": " — ",
+    "tagline": "demo of CMS system"
+  },
+  "timezone": "America/Denver",
+  "aceJS": [
+    {
+      "url": "https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.12/ace.js",
+      "sri": "sha512-GZ1RIgZaSc8rnco/8CXfRdCpDxRCphenIiZ2ztLy3XQfCbQUSCuk8IudvNHxkRA3oUg6q0qejgN/qqyG1duv5Q=="
+    },
+    {
+      "url": "https://cdnjs.cloudflare.com/ajax/libs/ace/1.4.12/ext-language_tools.min.js",
+      "sri": "sha512-8qx1DL/2Wsrrij2TWX5UzvEaYOFVndR7BogdpOyF4ocMfnfkw28qt8ULkXD9Tef0bLvh3TpnSAljDC7uyniEuQ=="
+    }
+  ]
+}
