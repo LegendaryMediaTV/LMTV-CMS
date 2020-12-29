@@ -12,8 +12,11 @@ It returns a single class, which has methods for working with the database and a
 // add the CMS framework class
 const CMS = require('@legendarymediatv/cms');
 
-// start the CMS by connecting to a MongoDB instance on the current server, anonymously connecting to the "cmsDB" database with the default port
-new CMS('localhost', 'cmsDB');
+// anonymously connect to the local MongoDB instance, using the cmsDB database
+const cms = new CMS('localhost', 'cmsDB');
+
+// start the CMS web server
+cms.listen();
 ```
 
 *NOTE: if the database doesn't exist and/or it doesn't contain a `cmsSettings` collection/record and/or it doesn't contain a `cmsPages` collection/record for `home`, it will run the `migration()` method to add the missing pieces to the database*

@@ -4,8 +4,10 @@ const helmet = require('helmet');  // help secure Express with HTTP headers
 const bs = require('@legendarymediatv/bootstrap');  // Bootstrap functionality
 const htmlEscaper = require('html-escaper');  // escape/unescape HTML entities
 const morgan = require('morgan');  // HTTP request logger
-//const mysql = require('mysql2/promise');  // MSSQL functionality
 const MongoClient = require('mongodb').MongoClient;
+const packageInfo = require('./package.json');  // get package information
+
+const cmsTemplateDivider = '//////////////////// TEMPLATE DIVIDER ////////////////////\r\n';
 
 /** Content Management System */
 module.exports = class CMS {
@@ -29,126 +31,37 @@ module.exports = class CMS {
         if (!port)
             port = 27017;
 
-        // configure Express
-        const app = express();
-        const webPort = process.env.PORT || 1337;  // web server port
-        //app.use(express.urlencoded({ extended: true }));  // allow POST via HTML forms
-        app.use(helmet({ contentSecurityPolicy: false }));  // enable Helmet, but allow pages to have external content
-        //app.use(express.json());  // convert body to JSON object when it is JSON
-        //app.use(express.static('public'));  // serve static content from the public folder to the root URL
-
-        // log package/environment/config information
-        const pkg = require('./package.json');  // get package information
-        this.debug = app.get('env') == 'development';
-        this.log(`Application: ${pkg.description}`);
-        this.log(`Version: ${pkg.version}`);
-        this.log(`Environment: ${app.get('env')}`);
-        this.log(`Server: ${server}`);
-        this.log(`Database: ${database}`);
-        if (username)
-            this.log(`Username: ${username}`);
-
         // retain database connection information
-        this.connection = 'mongodb://';
+        this._connectionString = 'mongodb://';
         if (username)
-            this.connection += `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`;
-        this.connection += `${server}:${port}`;
-        this.log(`MongoDB connection: ${this.connection}`);
-        this.database = database;
-        this.log(`MongoDB database: ${this.database}`);
+            this._connectionString += `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`;
+        this._connectionString += `${server}:${port}`;
+        this.log(`MongoDB connection: ${this._connectionString}`);
+        this._database = database;
+        this.log(`MongoDB database: ${this._database}`);
+        if (username)
+            this.log(`MongoDB username: ${username}`);
 
-        // configure Morgan
-        if (this.debug) {
-            app.use(morgan('tiny'));
-            this.log('Morgan enabled...');
-        }
-
-        // route all traffic through centralized router
-        app.use(async (req, res, next) => {
-            try {
-                let cmsSettings = await this.findOne('cms', { _id: 'settings' });
-                if (!cmsSettings) {
-                    await this.migrate();
-                    cmsSettings = await this.findOne('cms', { _id: 'settings' });
-                    if (!cmsSettings)
-                        throw new Error('Unable to find CMS settings');
+        // get CMS settings from the database
+        this.findOne('cms', { _id: 'settings' })
+            .then(async (settings) => {
+                // migrate and retry
+                if (!settings || this._webapp.get('env') == 'development') {
+                    await this.migrate(this._webapp.get('env') == 'development');
+                    settings = await this.findOne('cms', { _id: 'settings' });
                 }
 
-                const urlTokens = req.originalUrl.toLowerCase().split('/');
+                // still no settings, error out
+                if (!settings)
+                    throw new Error('Unable to find CMS settings');
+                // settings found, retain them
+                else
+                    this.settings = settings;
+            })
+            .catch((err) => { throw new Error(err); });
 
-                this.log(`URL: ${req.originalUrl}`);
-                this.log(`URL Tokens (${urlTokens.length}): ${urlTokens}`);
-
-                let page;
-
-                // loop through tokens in reverse order
-                for (let urlIndex = urlTokens.length - 1; urlIndex >= 0; urlIndex--) {
-                    // normalize URL token
-                    if (urlTokens[urlIndex] == '')
-                        urlTokens[urlIndex] = 'home';
-                    else
-                        urlTokens[urlIndex] = urlTokens[urlIndex];
-
-                    this.log(`URL Token (${urlIndex + 1}): ${urlTokens[urlIndex]}`);
-
-                    // get page information
-                    page = await this.findOne('cmsPages', { '_id': urlTokens[urlIndex] });
-                    if (page) {
-                        this.log(`Page: ${JSON.stringify(page)}`);
-
-                        break;
-                    }
-                }
-
-                // home page not found, do migration and find home page again
-                if (!page) {
-                    await this.migrate();
-                    page = await this.findOne('cmsPages', { '_id': 'home' });
-                    if (!page)
-                        throw new Error('Unable to find Home page');
-                }
-
-                // TODO: enforce URL
-
-                // TODO: use template to start HTML
-                const html = new bs.HTML(htmlEscaper.escape(page._id == 'home' ? pkg.description : page.title));
-
-                // TODO: pull Bootstrap info from siteSettings
-                html.bootstrap();
-
-                // evaluate the page content
-                eval(page.source);
-
-                // show page information
-                if (this.debug) {
-                    html.line();
-                    html.display1('Source');
-                    html.heading2('Page JSON');
-                    html.monospace(JSON.stringify(page, null, 4));
-                    html.heading2('Page Source');
-                    html.monospace(page.source);
-                }
-
-                // send response
-                res.send(html.toString());
-            }
-            catch (err) { next(err); }
-        });
-
-        // 500 server error
-        app.use(function (err, req, res) {
-            console.error(err.stack);
-            res.sendStatus(500);
-        });
-
-        // start web server
-        const now = new Date();
-        app.listen(webPort, () => this.log(
-            `Listening on port ${webPort} @ ${now.getHours()}`
-            + ':' + now.getMinutes().toString().padStart(2, '0')
-            + ':' + now.getSeconds().toString().padStart(2, '0')
-            + ' ...'
-        ));
+        // TODO: set the timezone: https://github.com/TooTallNate/node-time
+        // https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
     }
 
 
@@ -156,19 +69,286 @@ module.exports = class CMS {
      ***** Properties *****
      *********************/
 
-    /** database connection information [object] */
-    connection;
+    /**
+     * database connection string
+     * @type {string}
+     * @protected
+     */
+    _connectionString;
 
-    /** database name */
-    database;
+    /**
+     * database name
+     * @type {string}
+     * @protected
+     */
+    _database;
 
-    /** log debug info to the console [boolean] */
+    /**
+     * Express application
+     * @protected
+     */
+    _webapp;
+
+    /**
+     * log debug info to the console
+     * @type {boolean}
+     */
     debug;
 
+    /**
+     * CMS instance settings
+     * @type {object}
+     */
+    settings;
 
-    /*******************
-     ***** Methods *****
-     ******************/
+
+    /***********************
+     ***** CMS Methods *****
+     **********************/
+
+    /**
+     * get page information
+     * @param {string} search page ID
+     * @returns {object}
+     */
+    findPage(search) {
+        return new Promise(async (resolve, reject) => {
+            try {
+                // find the page in the database
+                let page = await this.findOne('cmsPages', { _id: search });
+
+                // add more metadata
+                if (page) {
+                    this.log(`Page found: ${page._id}`);
+
+                    // determine the page URL
+                    page.url = '/' + (page._id != 'home' ? page._id : '');
+
+                    // replace template
+                    page.template = await this.findOne('cmsTemplates', { _id: page.template });
+                }
+
+                resolve(page);
+            }
+            catch (err) { reject(new Error(err)); }
+        });
+    }
+
+    /**
+     * start Express web server
+     * @param {number} cmsWebPort web server port (defaults to process.env.PORT or 1337)
+     */
+    async listen(cmsWebPort) {
+        // set defaults
+        if (!cmsWebPort)
+            cmsWebPort = process.env.PORT || 1337;
+
+        // configure Express
+        this._webapp = express();
+        //this._webapp.use(express.urlencoded({ extended: true }));  // allow POST via HTML forms
+        this._webapp.use(helmet({ contentSecurityPolicy: false }));  // enable Helmet, but allow pages to have external content
+        //this._webapp.use(express.json());  // convert body to JSON object when it is JSON
+        //this._webapp.use(express.static('public'));  // serve static content from the public folder to the root URL
+
+        // log package/environment/config information
+        this.debug = this._webapp.get('env') == 'development';
+        this.log(`Application: ${packageInfo.description}`);
+        this.log(`Version: ${packageInfo.version}`);
+        this.log(`Environment: ${this._webapp.get('env')}`);
+
+        // configure Morgan
+        if (this.debug) {
+            this._webapp.use(morgan('tiny'));
+            this.log('Morgan enabled');
+        }
+
+        // route all traffic through centralized router
+        this._webapp.use(async (req, res, next) => {
+            try {
+                let cmsPage;
+
+                // loop through tokens in reverse order, loking for a matching page
+                const cmsTokens = req.originalUrl.toLowerCase().split('/');
+                for (let cmsTokenIndex = cmsTokens.length - 1; cmsTokenIndex >= 0; cmsTokenIndex--) {
+                    // normalize URL token
+                    if (cmsTokens[cmsTokenIndex] == '')
+                        cmsTokens[cmsTokenIndex] = 'home';
+                    else
+                        cmsTokens[cmsTokenIndex] = cmsTokens[cmsTokenIndex];
+
+                    this.log(`URL Token (${cmsTokenIndex + 1}): ${cmsTokens[cmsTokenIndex]}`);
+
+                    // get page information
+                    cmsPage = await this.findPage(cmsTokens[cmsTokenIndex]);
+                    if (cmsPage) {
+                        this.log(`Page: ${JSON.stringify(cmsPage, null, 4)}`);
+
+                        break;
+                    }
+                }
+
+                // home page not found, do migration and find home page again
+                if (!cmsPage) {
+                    await this.migrate();
+                    cmsPage = await this.findOne('cmsPages', { '_id': 'home' });
+                    if (!cmsPage)
+                        throw new Error('Unable to find Home page');
+                }
+
+                // TODO: enforce URL
+                // res.redirect(301, '/');
+
+                let output;
+
+
+                // evaluate the template header
+                try { eval(cmsPage.template.header); }
+                // evaluation failed, show error
+                catch (err) {
+                    output = new bs.HTML(htmlEscaper.escape(cmsPage._id == 'home' ? packageInfo.description : cmsPage.title));
+
+                    // enable Bootstrap
+                    output.bootstrap(
+                        this.settings.bootstrapCSS,
+                        this.settings.bootstrapJS,
+                        true,
+                        this.settings.jqueryJS,
+                        this.settings.popperJS,
+                        this.settings.fontawesomeCSS
+                    );
+
+
+                    output.alert([new bs.Heading1('CMS Template header error'), err], { theme: 'danger' });
+                }
+
+                // evaluate the page body
+                try { eval(cmsPage.body); }
+                // evaluation failed, show error
+                catch (err) { output.alert([new bs.Heading1('CMS Page body error'), err], { theme: 'danger' }); }
+
+                // show page information
+                if (this.debug && output instanceof bs.HTML) {
+                    const cmsDebugMonospace = { borderLeft: true, borderTheme: 'info', marginLeft: 3, paddingLeft: 3 };
+                    const cmsDebugAlert = new bs.Alert(null, { theme: 'info' });
+                    cmsDebugAlert.displayHeading1('Source');
+                    cmsDebugAlert.heading2('Page JSON');
+                    cmsDebugAlert.monospace(htmlEscaper.escape(JSON.stringify(cmsPage, null, 4)), cmsDebugMonospace);
+                    cmsDebugAlert.heading2('Template header');
+                    cmsDebugAlert.monospace(htmlEscaper.escape(cmsPage.template.header), cmsDebugMonospace);
+                    cmsDebugAlert.heading2('Page body');
+                    cmsDebugAlert.monospace(htmlEscaper.escape(cmsPage.body), cmsDebugMonospace);
+                    cmsDebugAlert.heading2('Template footer');
+                    cmsDebugAlert.monospace(htmlEscaper.escape(cmsPage.template.footer), cmsDebugMonospace);
+                    output.add(cmsDebugAlert);
+                }
+
+                // evaluate the template footer
+                try { eval(cmsPage.template.footer); }
+                // evaluation failed, show error
+                catch (err) { output.alert([new bs.Heading1('CMS Template footer error'), err], { theme: 'danger' }); }
+
+                // send response
+                res.send(output.toString());
+            }
+            catch (err) { next(err); }
+        });
+
+        // 500 server error
+        this._webapp.use(function (err, req, res) {
+            console.error(err.stack);
+            res.sendStatus(500);
+        });
+
+        // start web server
+        const cmsNow = new Date();
+        this._webapp.listen(cmsWebPort, () => this.log(
+            `Listening on port ${cmsWebPort} @ ${cmsNow.getHours()}`
+            + ':' + cmsNow.getMinutes().toString().padStart(2, '0')
+            + ':' + cmsNow.getSeconds().toString().padStart(2, '0')
+            + ' ...'
+        ));
+    }
+
+    /**
+     * log output to the console if debugging enabled
+     * @param {any} output
+     */
+    log(output) {
+        if (this.debug)
+            console.log(typeof output == 'object' ? JSON.stringify(output) : output);
+    }
+
+    /**
+     * ensure the latest structure and settings are in place
+     * @param {true} force force the migration (i.e., upsert) 
+     */
+    migrate(force) {
+        return new Promise(async (resolve, reject) => {
+            try {
+                const fs = require('fs');  // enable filesystem functionality
+                const path = require('path');  // enable path functionality
+
+                // read seed data files
+                const dir = await fs.promises.opendir(fs.existsSync('./seed') ? './seed' : './node_modules/@legendarymediatv/cms/MySQL/seed');
+                for await (const entry of dir) {
+                    const entryPath = path.parse(entry.name);
+
+                    // JSON files are NoSQL documents
+                    if (entryPath.ext == '.json') {
+                        // parse file name for collection and _id
+                        const collection = entryPath.name.substr(0, entryPath.name.indexOf('-'));
+                        const id = entryPath.name.substr(entryPath.name.indexOf('-') + 1);
+
+                        // see if the document already exists
+                        let document = await this.findOne(collection, { _id: id });
+
+                        // document not found, add it
+                        if (!document || force) {
+                            // read in document from the file and convert it to JSON
+                            document = await fs.promises.readFile(`${dir.path}/${entry.name}`, { encoding: 'utf-8' });
+                            document = JSON.parse(document);
+
+                            if (['cmsPages', 'cmsTemplates'].includes(collection)) {
+                                // read corresponding source file into the document
+                                try {
+                                    let source = await fs.promises.readFile(`${dir.path}/${entryPath.name}.js`, { encoding: 'utf-8' });
+
+                                    if (collection == 'cmsPages')
+                                        document.body = source;
+                                    else {
+                                        source = source.split(cmsTemplateDivider);
+                                        if (source.length != 3)
+                                            throw new Error(`CMS Template source must have three parts: ${collection}.${id} (${source.length})`);
+
+                                        document.header = source[0].length ? source[0] : null;
+                                        document.body = source[1].length ? source[1] : null;
+                                        document.footer = source[2].length ? source[2] : null;
+                                    }
+                                }
+                                catch (err) { }
+
+                                // add dynamic metadata to pages/templates
+                                document.created = new Date();
+                                document.updated = new Date();
+                            }
+
+                            // add/update the document
+                            document = await this.replaceOne(collection, { _id: id }, document, { upsert: true });
+                            this.log(`Upserted ${collection}.${id}: ${JSON.stringify(document)}`);
+                        }
+                    }
+                }
+
+                resolve(true);
+            }
+            catch (err) { reject(new Error(err)); }
+        });
+    }
+
+
+    /****************************
+     ***** Database Methods *****
+     ***************************/
 
     /**
      * delete multiple MongoDB documents
@@ -193,8 +373,8 @@ module.exports = class CMS {
                     throw `MongoDB options must be JSON: ${typeof options}`;
 
                 // query the database
-                const client = await MongoClient.connect(this.connection, { useUnifiedTopology: true });
-                const dbo = client.db(this.database);
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
                 const results = await dbo.collection(collection).deleteMany(filter, options);
                 client.close();
                 resolve(results);
@@ -226,8 +406,8 @@ module.exports = class CMS {
                     throw `MongoDB options must be JSON: ${typeof options}`;
 
                 // query the database
-                const client = await MongoClient.connect(this.connection, { useUnifiedTopology: true });
-                const dbo = client.db(this.database);
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
                 const results = await dbo.collection(collection).deleteOne(filter, options);
                 client.close();
                 resolve(results);
@@ -259,8 +439,8 @@ module.exports = class CMS {
                     throw `MongoDB options must be JSON: ${typeof options}`;
 
                 // query the database
-                const client = await MongoClient.connect(this.connection, { useUnifiedTopology: true });
-                const dbo = client.db(this.database);
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
                 const results = await dbo.collection(collection).find(filter, options).toArray();
                 client.close();
                 resolve(results);
@@ -292,8 +472,8 @@ module.exports = class CMS {
                     throw `MongoDB options must be JSON: ${typeof options}`;
 
                 // query the database
-                const client = await MongoClient.connect(this.connection, { useUnifiedTopology: true });
-                const dbo = client.db(this.database);
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
                 const results = await dbo.collection(collection).findOne(filter, options);
                 client.close();
                 resolve(results);
@@ -302,11 +482,14 @@ module.exports = class CMS {
         });
     }
 
+    // TODO: insertMany https://docs.mongodb.com/manual/reference/method/db.collection.insertMany/
+
     /**
      * add a new MongoDB document
+     * https://docs.mongodb.com/manual/reference/method/db.collection.insertOne/
      * @param {string} collection MongoDB collection to search. https://docs.mongodb.com/manual/core/databases-and-collections/#collections
-     * @param {object} document JSON object
-     * @param {object} options Optional. Specifies additional query options such as sort and projection to configure the result set. http://mongodb.github.io/node-mongodb-native/3.6/api/Collection.html#findOne
+     * @param {object} document A JSON document to insert into the collection.
+     * @param {object} options Optional. A document expressing the write concern. Omit to use the default write concern. https://docs.mongodb.com/manual/reference/write-concern/
      */
     insertOne(collection, document, options) {
         return new Promise(async (resolve, reject) => {
@@ -320,8 +503,8 @@ module.exports = class CMS {
                     options = {};
 
                 // query the database
-                const client = await MongoClient.connect(this.connection, { useUnifiedTopology: true });
-                const dbo = client.db(this.database);
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
                 const results = await dbo.collection(collection).insertOne(document, options);
                 client.close();
                 resolve(results);
@@ -331,58 +514,72 @@ module.exports = class CMS {
     }
 
     /**
-     * log output to the console if debugging enabled
-     * @param {any} output
+     * replace a MongoDB document
+     * https://docs.mongodb.com/manual/reference/method/db.collection.replaceMany/
+     * @param {string} collection NoSQL collection to search. https://docs.mongodb.com/manual/core/databases-and-collections/#collections
+     * @param {object} filter Optional. Specifies selection filter using query operators. To return all documents in a collection, omit this parameter or pass an empty document ({}). https://docs.mongodb.com/manual/reference/operator/query/
+     * @param {object} document The replacement JSON document.
+     * @param {object} options Optional. Specifies additional query options.
      */
-    log(output) {
-        if (this.debug)
-            console.log(typeof output == 'object' ? JSON.stringify(output) : output);
-    }
-
-    /** ensure the latest structure and settings are in place */
-    migrate() {
+    replaceMany(collection, filter, document, options) {
         return new Promise(async (resolve, reject) => {
             try {
-                const fs = require('fs');  // enable filesystem functionality
-                const path = require('path');  // enable path functionality
+                // enforce requirements
+                if (!collection)
+                    throw 'MongoDB collection is required';
+                if (!filter)
+                    filter = {};
+                else if (typeof filter != 'object')
+                    throw `MongoDB filter must be JSON: ${typeof filter}`;
+                if (!document || typeof document != 'object')
+                    throw `MongoDB document is required and must be JSON ${typeof document}`;
+                if (!options)
+                    options = {};
+                else if (typeof options != 'object')
+                    throw `MongoDB options must be JSON: ${typeof options}`;
 
-                // read seed data files
-                const dir = await fs.promises.opendir(fs.existsSync('./seed') ? './seed' : './node_modules/@legendarymediatv/cms/MySQL/seed');
-                for await (const entry of dir) {
-                    const entryPath = path.parse(entry.name);
+                // query the database
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
+                const results = await dbo.collection(collection).replaceMany(filter, document, options);
+                client.close();
+                resolve(results);
+            }
+            catch (err) { reject(new Error(err)); }
+        });
+    }
 
-                    // JSON files are NoSQL documents
-                    if (entryPath.ext == '.json') {
-                        // parse file name for collection and _id
-                        const collection = entryPath.name.substr(0, entryPath.name.indexOf('-'));
-                        const id = entryPath.name.substr(entryPath.name.indexOf('-') + 1);
+    /**
+     * replace a MongoDB document
+     * https://docs.mongodb.com/manual/reference/method/db.collection.replaceOne/
+     * @param {string} collection NoSQL collection to search. https://docs.mongodb.com/manual/core/databases-and-collections/#collections
+     * @param {object} filter Optional. Specifies selection filter using query operators. To return all documents in a collection, omit this parameter or pass an empty document ({}). https://docs.mongodb.com/manual/reference/operator/query/
+     * @param {object} document The replacement JSON document.
+     * @param {object} options Optional. Specifies additional query options.
+     */
+    replaceOne(collection, filter, document, options) {
+        return new Promise(async (resolve, reject) => {
+            try {
+                // enforce requirements
+                if (!collection)
+                    throw 'MongoDB collection is required';
+                if (!filter)
+                    filter = {};
+                else if (typeof filter != 'object')
+                    throw `MongoDB filter must be JSON: ${typeof filter}`;
+                if (!document || typeof document != 'object')
+                    throw `MongoDB document is required and must be JSON ${typeof document}`;
+                if (!options)
+                    options = {};
+                else if (typeof options != 'object')
+                    throw `MongoDB options must be JSON: ${typeof options}`;
 
-                        // see if the document already exists
-                        let document = await this.findOne(collection, { _id: id });
-
-                        // document not found, add it
-                        if (!document) {
-                            this.log(`Adding ${collection}.${id}`);
-
-                            // read in document from the file and convert it to JSON
-                            document = await fs.promises.readFile(`${dir.path}/${entry.name}`, { encoding: 'utf-8' });
-                            document = JSON.parse(document);
-
-                            // read corresponding source file into document.source
-                            if (collection == 'cmsPages') {
-                                try { document.source = await fs.promises.readFile(`${dir.path}/${entryPath.name}.js`, { encoding: 'utf-8' }); }
-                                catch (err) { }
-                            }
-
-                            // add the document
-                            this.log(JSON.stringify(document, null, 4));
-                            document = await this.insertOne(collection, document);
-                            this.log(`Added document: ${document}`);
-                        }
-                    }
-                }
-
-                resolve(true);
+                // query the database
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
+                const results = await dbo.collection(collection).replaceOne(filter, document, options);
+                client.close();
+                resolve(results);
             }
             catch (err) { reject(new Error(err)); }
         });
@@ -414,8 +611,8 @@ module.exports = class CMS {
                     throw `MongoDB options must be JSON: ${typeof options}`;
 
                 // query the database
-                const client = await MongoClient.connect(this.connection, { useUnifiedTopology: true });
-                const dbo = client.db(this.database);
+                const client = await MongoClient.connect(this._connectionString, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
                 const results = await dbo.collection(collection).updateMany(filter, update, options);
                 client.close();
                 resolve(results);
@@ -450,8 +647,8 @@ module.exports = class CMS {
                     throw `MongoDB options must be JSON: ${typeof options}`;
 
                 // query the database
-                const client = await MongoClient.connect(this.connection, { useUnifiedTopology: true });
-                const dbo = client.db(this.database);
+                const client = await MongoClient.connect(this._connection, { useUnifiedTopology: true });
+                const dbo = client.db(this._database);
                 const results = await dbo.collection(collection).updateOne(filter, update, options);
                 client.close();
                 resolve(results);

@@ -1,3 +1,3 @@
-html.display1('Hello World!');
-html.paragraph('Things, stuff, what-have-you.');
-html.alert('Achtung!', { theme: 'primary' });
+output.displayHeading1('Hello World!');
+output.paragraph('Alright world, time to take you on!');
+output.paragraph(new bs.Italics(cmsPage.created), { textTheme: 'muted' });
